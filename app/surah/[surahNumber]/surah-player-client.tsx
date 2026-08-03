@@ -1,34 +1,23 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { ChevronLeft } from "lucide-react";
 import { api } from "@/convex/_generated/api";
 import { useIdentity } from "@/lib/identity-context";
-import { getGlobalAyahNumber, getSurahMeta } from "@/lib/quran-meta";
-import { ARABIC_TEXT_EDITION, buildEditionsCsv } from "@/lib/editions";
-import { AudioPlayer, type SegmentKind } from "@/components/audio-player";
+import { getSurahMeta } from "@/lib/quran-meta";
+import { ENGLISH_TRANSLATION_EDITION, URDU_TRANSLATION_EDITION } from "@/lib/editions";
+import { useSurahAyahs } from "@/lib/use-surah-ayahs";
+import { usePlayer } from "@/lib/player-context";
 import { AyahLine } from "@/components/ayah-line";
 import { Skeleton } from "@/components/ui/skeleton";
-
-interface EditionResult {
-  ayahs: { number: number; text: string; numberInSurah: number }[];
-  edition: { identifier: string };
-}
-
-interface AyahRow {
-  numberInSurah: number;
-  globalAyahNumber: number;
-  arabicText: string;
-  englishText?: string;
-  urduText?: string;
-}
 
 export function SurahPlayerClient({ surahNumber }: { surahNumber: number }) {
   const searchParams = useSearchParams();
   const surahMeta = getSurahMeta(surahNumber);
+  const player = usePlayer();
 
   const { userId } = useIdentity();
   const preferences = useQuery(api.preferences.getPreferences, userId ? { userId } : "skip");
@@ -36,84 +25,50 @@ export function SurahPlayerClient({ surahNumber }: { surahNumber: number }) {
     api.progress.getSurahProgress,
     userId ? { userId, surahNumber } : "skip"
   );
-  const reportAyahPlayback = useMutation(api.progress.reportAyahPlayback);
   const unmarkAyah = useMutation(api.progress.unmarkAyah);
-  const updatePreferences = useMutation(api.preferences.updatePreferences);
+  const reportAyahPlayback = useMutation(api.progress.reportAyahPlayback);
 
-  const editionsKey = useMemo(
-    () => buildEditionsCsv(preferences?.showEnglish ?? false, preferences?.showUrdu ?? false),
-    [preferences?.showEnglish, preferences?.showUrdu]
+  const ayahs = useSurahAyahs(
+    surahNumber,
+    preferences?.englishEdition ?? ENGLISH_TRANSLATION_EDITION,
+    preferences?.urduEdition ?? URDU_TRANSLATION_EDITION,
+    preferences?.showEnglish ?? false,
+    preferences?.showUrdu ?? false
   );
-
-  const cachedPayload = useQuery(api.quranContent.getCachedSurah, { surahNumber, editionsKey });
-  const fetchAndCacheSurah = useAction(api.quranContent.fetchAndCacheSurah);
-  const contentKey = `${surahNumber}:${editionsKey}`;
-  const [fetchedPayload, setFetchedPayload] = useState<{ key: string; payload: string } | null>(
-    null
-  );
-
-  useEffect(() => {
-    if (cachedPayload === null) {
-      fetchAndCacheSurah({ surahNumber, editionsKey }).then((payload) => {
-        setFetchedPayload({ key: contentKey, payload });
-      });
-    }
-  }, [cachedPayload, surahNumber, editionsKey, contentKey, fetchAndCacheSurah]);
-
-  const payload =
-    cachedPayload ?? (fetchedPayload?.key === contentKey ? fetchedPayload.payload : null);
-
-  const ayahs: AyahRow[] | null = useMemo(() => {
-    if (!payload) return null;
-    const results: EditionResult[] = JSON.parse(payload);
-    const arabic = results.find((r) => r.edition.identifier === ARABIC_TEXT_EDITION);
-    const english = results.find((r) => r.edition.identifier === preferences?.englishEdition);
-    const urdu = results.find((r) => r.edition.identifier === preferences?.urduEdition);
-    if (!arabic) return null;
-    return arabic.ayahs.map((a, i) => ({
-      numberInSurah: a.numberInSurah,
-      globalAyahNumber: getGlobalAyahNumber(surahNumber, a.numberInSurah),
-      arabicText: a.text,
-      englishText: english?.ayahs[i]?.text,
-      urduText: urdu?.ayahs[i]?.text,
-    }));
-  }, [payload, preferences?.englishEdition, preferences?.urduEdition, surahNumber]);
 
   const listenedSet = useMemo(
     () => new Set(surahProgress?.listenedAyahNumbers ?? []),
     [surahProgress]
   );
 
+  const isThisSurahPlaying = player.surahNumber === surahNumber;
   const initialAyahNumberInSurah = Number(searchParams.get("ayah")) || null;
-  const [currentAyahNumberInSurah, setCurrentAyahNumberInSurah] = useState<number | null>(null);
-  const [playingKind, setPlayingKind] = useState<SegmentKind | null>(null);
   const ayahRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const hasScrolledToInitial = useRef(false);
 
+  // On first load, scroll to the requested/resumed ayah — unless this surah
+  // is already the one playing, in which case the "follow along" effect
+  // below takes over and scrolls to the actual playing position instead.
   useEffect(() => {
     if (!ayahs || hasScrolledToInitial.current) return;
-    const target = initialAyahNumberInSurah ?? 1;
     hasScrolledToInitial.current = true;
-    setCurrentAyahNumberInSurah(target);
+    if (isThisSurahPlaying) return;
+    const target = initialAyahNumberInSurah ?? 1;
     requestAnimationFrame(() => {
       ayahRefs.current[target]?.scrollIntoView({ behavior: "smooth", block: "center" });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ayahs]);
+  }, [ayahs, isThisSurahPlaying]);
 
-  function handleAyahCompleted(row: { numberInSurah: number; globalAyahNumber: number }) {
-    if (!userId) return;
-    reportAyahPlayback({
-      userId,
-      surahNumber,
-      ayahNumberInSurah: row.numberInSurah,
-      globalAyahNumber: row.globalAyahNumber,
-      completed: true,
-      source: "auto",
+  useEffect(() => {
+    if (!isThisSurahPlaying || player.ayahNumberInSurah === null) return;
+    ayahRefs.current[player.ayahNumberInSurah]?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
     });
-  }
+  }, [isThisSurahPlaying, player.ayahNumberInSurah]);
 
-  function handleToggleManual(row: AyahRow) {
+  function handleToggleManual(row: { numberInSurah: number; globalAyahNumber: number }) {
     if (!userId) return;
     if (listenedSet.has(row.numberInSurah)) {
       unmarkAyah({ userId, globalAyahNumber: row.globalAyahNumber });
@@ -156,34 +111,15 @@ export function SurahPlayerClient({ surahNumber }: { surahNumber: number }) {
                 ayahRefs.current[row.numberInSurah] = el;
               }}
               row={row}
-              active={row.numberInSurah === currentAyahNumberInSurah}
-              activeKind={playingKind}
+              active={isThisSurahPlaying && row.numberInSurah === player.ayahNumberInSurah}
+              activeKind={isThisSurahPlaying ? player.playingKind : null}
               listened={listenedSet.has(row.numberInSurah)}
               onToggleManual={() => handleToggleManual(row)}
+              onPlayFromHere={() => player.playFromAyah(surahNumber, row.numberInSurah)}
             />
           ))
         )}
       </div>
-
-      {ayahs && (
-        <AudioPlayer
-          ayahs={ayahs}
-          surahNumber={surahNumber}
-          reciterFolder={preferences?.reciterFolder}
-          onReciterChange={(folder) => userId && updatePreferences({ userId, reciterFolder: folder })}
-          showEnglish={preferences?.showEnglish ?? false}
-          showUrdu={preferences?.showUrdu ?? false}
-          onToggleEnglish={(value) => userId && updatePreferences({ userId, showEnglish: value })}
-          onToggleUrdu={(value) => userId && updatePreferences({ userId, showUrdu: value })}
-          currentAyahNumberInSurah={currentAyahNumberInSurah}
-          onCurrentAyahChange={(n) => {
-            setCurrentAyahNumberInSurah(n);
-            ayahRefs.current[n]?.scrollIntoView({ behavior: "smooth", block: "center" });
-          }}
-          onAyahCompleted={handleAyahCompleted}
-          onSegmentKindChange={setPlayingKind}
-        />
-      )}
     </main>
   );
 }

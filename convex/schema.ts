@@ -19,6 +19,9 @@ export default defineSchema({
     showEnglish: v.boolean(),
     urduEdition: v.string(),
     englishEdition: v.string(),
+    // Optional: added after initial launch, so existing rows may not have it.
+    playbackRate: v.optional(v.number()),
+    pauseAfterAyah: v.optional(v.boolean()),
     updatedAt: v.number(),
   }).index("by_userId", ["userId"]),
 

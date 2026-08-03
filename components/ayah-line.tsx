@@ -2,7 +2,7 @@
 
 import { CheckCircle2, Circle } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { SegmentKind } from "@/components/audio-player";
+import type { SegmentKind } from "@/lib/player-context";
 
 interface AyahRow {
   numberInSurah: number;
@@ -17,6 +17,7 @@ export function AyahLine({
   activeKind,
   listened,
   onToggleManual,
+  onPlayFromHere,
   setRef,
 }: {
   row: AyahRow;
@@ -24,13 +25,23 @@ export function AyahLine({
   activeKind: SegmentKind | null;
   listened: boolean;
   onToggleManual: () => void;
+  onPlayFromHere: () => void;
   setRef: (el: HTMLDivElement | null) => void;
 }) {
   return (
     <div
       ref={setRef}
+      role="button"
+      tabIndex={0}
+      onClick={onPlayFromHere}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onPlayFromHere();
+        }
+      }}
       className={cn(
-        "flex flex-col gap-3 rounded-xl border border-transparent p-3 transition-colors",
+        "flex cursor-pointer flex-col gap-3 rounded-xl border border-transparent p-3 transition-colors hover:bg-accent/60",
         active && "border-border bg-accent"
       )}
     >
@@ -49,7 +60,10 @@ export function AyahLine({
         </p>
         <button
           type="button"
-          onClick={onToggleManual}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleManual();
+          }}
           className="mt-1 shrink-0 text-muted-foreground transition-colors hover:text-primary"
           aria-label={listened ? "Mark as not listened" : "Mark as listened"}
         >

@@ -19,6 +19,8 @@ export const updatePreferences = mutation({
     showEnglish: v.optional(v.boolean()),
     urduEdition: v.optional(v.string()),
     englishEdition: v.optional(v.string()),
+    playbackRate: v.optional(v.number()),
+    pauseAfterAyah: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const { userId, ...patch } = args;

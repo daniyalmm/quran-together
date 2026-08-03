@@ -27,7 +27,7 @@ export default function SurahsPage() {
   }, [search]);
 
   return (
-    <main className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-4 p-6 pb-24">
+    <main className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-4 p-6 pb-44">
       <header className="pt-4">
         <h1 className="text-2xl font-semibold">Surahs</h1>
       </header>

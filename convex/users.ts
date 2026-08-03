@@ -40,6 +40,8 @@ export const getOrCreateAnonymousUser = mutation({
       showEnglish: true,
       urduEdition: URDU_TRANSLATION_EDITION,
       englishEdition: ENGLISH_TRANSLATION_EDITION,
+      playbackRate: 1,
+      pauseAfterAyah: false,
       updatedAt: now,
     });
 

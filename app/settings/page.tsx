@@ -64,7 +64,7 @@ export default function SettingsPage() {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-6 p-6 pb-24">
+    <main className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-6 p-6 pb-44">
       <header className="pt-4">
         <h1 className="text-2xl font-semibold">Settings</h1>
       </header>
@@ -128,6 +128,22 @@ export default function SettingsPage() {
               checked={preferences?.showUrdu ?? false}
               onCheckedChange={(checked) =>
                 userId && updatePreferences({ userId, showUrdu: checked })
+              }
+            />
+          </div>
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <Label htmlFor="pause-after-ayah-toggle">Pause after each ayah</Label>
+              <p className="text-xs text-muted-foreground">
+                Stop at the end of every ayah (after its translations, if on) instead of
+                continuing straight to the next.
+              </p>
+            </div>
+            <Switch
+              id="pause-after-ayah-toggle"
+              checked={preferences?.pauseAfterAyah ?? false}
+              onCheckedChange={(checked) =>
+                userId && updatePreferences({ userId, pauseAfterAyah: checked })
               }
             />
           </div>

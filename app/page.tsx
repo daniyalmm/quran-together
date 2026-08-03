@@ -16,7 +16,7 @@ export default function DashboardPage() {
   const lastPosition = useQuery(api.progress.getLastPosition, userId ? { userId } : "skip");
 
   return (
-    <main className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-6 p-6 pb-24">
+    <main className="mx-auto flex w-full max-w-lg flex-1 flex-col gap-6 p-6 pb-44">
       <header className="pt-4">
         <h1 className="text-2xl font-semibold">Quran Together</h1>
         <p className="text-sm text-muted-foreground">Your listening progress</p>
