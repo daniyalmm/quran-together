@@ -1,11 +1,21 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
-import { Play, Pause, SkipBack, SkipForward, ChevronRight, SlidersHorizontal } from "lucide-react";
+import {
+  Play,
+  Pause,
+  SkipBack,
+  SkipForward,
+  RotateCcw,
+  RotateCw,
+  ChevronRight,
+  SlidersHorizontal,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Progress } from "@/components/ui/progress";
+import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { RECITERS, RECITER_ITEMS } from "@/lib/editions";
@@ -25,16 +35,34 @@ function formatTime(seconds: number): string {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
+function extractSliderValue(v: number | readonly number[]): number {
+  const raw = Array.isArray(v) ? v[0] : v;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+}
+
+function SkipSecondsIcon({ direction }: { direction: "back" | "forward" }) {
+  const Icon = direction === "back" ? RotateCcw : RotateCw;
+  return (
+    <span className="relative inline-flex items-center justify-center">
+      <Icon className="size-5" />
+      <span className="absolute text-[0.5rem] font-bold leading-none">10</span>
+    </span>
+  );
+}
+
 export function GlobalPlayerBar() {
   const player = usePlayer();
+  const [dragPercent, setDragPercent] = useState<number | null>(null);
 
   if (player.surahNumber === null || player.ayahNumberInSurah === null) return null;
 
   const surahMeta = getSurahMeta(player.surahNumber);
   const duration = player.sessionDurationSeconds;
   const position = player.sessionPositionSeconds;
-  const remaining = duration !== null ? Math.max(0, duration - position) : null;
-  const percent = duration && duration > 0 ? Math.min(100, (position / duration) * 100) : 0;
+  const livePercent = duration && duration > 0 ? Math.min(100, (position / duration) * 100) : 0;
+  const displayPercent = dragPercent ?? livePercent;
+  const displaySeconds = duration !== null ? (displayPercent / 100) * duration : position;
+  const remaining = duration !== null ? Math.max(0, duration - displaySeconds) : null;
 
   return (
     <div className="fixed inset-x-0 bottom-16 z-30 border-t border-border bg-background/95 backdrop-blur">
@@ -57,9 +85,20 @@ export function GlobalPlayerBar() {
 
         <div className="flex items-center gap-2">
           <span className="w-9 shrink-0 text-right text-[0.65rem] tabular-nums text-muted-foreground">
-            {formatTime(position)}
+            {formatTime(displaySeconds)}
           </span>
-          <Progress value={percent} className="flex-1" />
+          <Slider
+            value={[displayPercent]}
+            min={0}
+            max={100}
+            step={0.1}
+            className="flex-1"
+            onValueChange={(v) => setDragPercent(extractSliderValue(v))}
+            onValueCommitted={(v) => {
+              player.seekToPercent(extractSliderValue(v));
+              setDragPercent(null);
+            }}
+          />
           <span className="w-10 shrink-0 text-[0.65rem] tabular-nums text-muted-foreground">
             {remaining !== null ? `-${formatTime(remaining)}` : "--:--"}
           </span>
@@ -69,20 +108,26 @@ export function GlobalPlayerBar() {
           <button
             type="button"
             onClick={player.cyclePlaybackRate}
-            className="rounded-full border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+            className="shrink-0 rounded-full border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
             title="Playback speed"
           >
             {player.playbackRate}x
           </button>
 
-          <div className="flex items-center gap-1">
-            <Button variant="ghost" size="icon" onClick={player.skipPrev}>
+          <div className="flex items-center gap-0.5">
+            <Button variant="ghost" size="icon-sm" onClick={player.previousSurah} title="Previous surah">
               <SkipBack className="size-4" />
+            </Button>
+            <Button variant="ghost" size="icon-sm" onClick={player.skipBack10} title="Back 10 seconds">
+              <SkipSecondsIcon direction="back" />
             </Button>
             <Button size="icon-lg" onClick={player.togglePlayPause}>
               {player.isPlaying ? <Pause className="size-5" /> : <Play className="size-5" />}
             </Button>
-            <Button variant="ghost" size="icon" onClick={player.skipNext}>
+            <Button variant="ghost" size="icon-sm" onClick={player.skipForward10} title="Forward 10 seconds">
+              <SkipSecondsIcon direction="forward" />
+            </Button>
+            <Button variant="ghost" size="icon-sm" onClick={player.nextSurah} title="Next surah">
               <SkipForward className="size-4" />
             </Button>
           </div>

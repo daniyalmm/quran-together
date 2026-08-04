@@ -77,20 +77,6 @@ function getNextSegment(
   return null;
 }
 
-/** How many segments remain from (and including) `segment` through the end of its surah. */
-function countRemainingSegmentsInSurah(
-  segment: Segment,
-  showEnglish: boolean,
-  showUrdu: boolean
-): number {
-  const kindsPerAyah = 1 + (showEnglish ? 1 : 0) + (showUrdu ? 1 : 0);
-  const totalAyahs = getSurahMeta(segment.surahNumber).numberOfAyahs;
-  const fullAyahsAfterThis = totalAyahs - segment.ayahNumberInSurah;
-  const kindsLeftInThisAyah =
-    segment.kind === "arabic" ? kindsPerAyah - 1 : segment.kind === "english" ? (showUrdu ? 1 : 0) : 0;
-  return 1 + kindsLeftInThisAyah + fullAyahsAfterThis * kindsPerAyah;
-}
-
 const FALLBACK_SEGMENT_SECONDS = 4;
 
 interface PlayerContextValue {
@@ -109,8 +95,12 @@ interface PlayerContextValue {
   sessionDurationSeconds: number | null;
   playFromAyah: (surahNumber: number, ayahNumberInSurah: number) => void;
   togglePlayPause: () => void;
-  skipPrev: () => void;
-  skipNext: () => void;
+  skipBack10: () => void;
+  skipForward10: () => void;
+  previousSurah: () => void;
+  nextSurah: () => void;
+  /** Seeks to `percent` (0-100) of the current session timeline — used by the scrubber. */
+  seekToPercent: (percent: number) => void;
   setReciterFolder: (folder: string) => void;
   setShowEnglish: (value: boolean) => void;
   setShowUrdu: (value: boolean) => void;
@@ -180,28 +170,63 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   // estimate for not-yet-played segments (their average) keeps improving.
   const elapsedSecondsRef = useRef(0);
   const segmentDurationsRef = useRef<Map<string, number>>(new Map());
+  // Average measured duration per segment kind — kept separate because
+  // spoken translation clips run noticeably longer than the Arabic
+  // recitation of the same ayah, so one blended average would badly skew
+  // estimates for whichever kind is actually still ahead.
+  const kindTotalsRef = useRef<Record<SegmentKind, { sum: number; count: number }>>({
+    arabic: { sum: 0, count: 0 },
+    english: { sum: 0, count: 0 },
+    urdu: { sum: 0, count: 0 },
+  });
+  const sessionStartRef = useRef<{ surahNumber: number; ayahNumberInSurah: number } | null>(null);
   const [sessionPositionSeconds, setSessionPositionSeconds] = useState(0);
   const [sessionDurationSeconds, setSessionDurationSeconds] = useState<number | null>(null);
+  const sessionDurationRef = useRef<number | null>(null);
 
-  function averageKnownSegmentSeconds(): number {
-    const values = Array.from(segmentDurationsRef.current.values());
-    if (values.length === 0) return FALLBACK_SEGMENT_SECONDS;
-    return values.reduce((a, b) => a + b, 0) / values.length;
+  function averageSecondsForKind(kind: SegmentKind): number {
+    const totals = kindTotalsRef.current[kind];
+    return totals.count > 0 ? totals.sum / totals.count : FALLBACK_SEGMENT_SECONDS;
+  }
+
+  function recordMeasuredDuration(segment: Segment, seconds: number) {
+    segmentDurationsRef.current.set(segment.url, seconds);
+    const totals = kindTotalsRef.current[segment.kind];
+    totals.sum += seconds;
+    totals.count += 1;
+  }
+
+  /** Estimated seconds for `segment` (using its known duration if measured) through the end of its surah. */
+  function estimateSecondsFrom(segment: Segment, showEnglish: boolean, showUrdu: boolean): number {
+    const totalAyahs = getSurahMeta(segment.surahNumber).numberOfAyahs;
+    let total = segmentDurationsRef.current.get(segment.url) ?? averageSecondsForKind(segment.kind);
+
+    if (segment.kind === "arabic") {
+      if (showEnglish) total += averageSecondsForKind("english");
+      if (showUrdu) total += averageSecondsForKind("urdu");
+    } else if (segment.kind === "english" && showUrdu) {
+      total += averageSecondsForKind("urdu");
+    }
+
+    const perAyah =
+      averageSecondsForKind("arabic") +
+      (showEnglish ? averageSecondsForKind("english") : 0) +
+      (showUrdu ? averageSecondsForKind("urdu") : 0);
+    const fullAyahsAfterThis = totalAyahs - segment.ayahNumberInSurah;
+    return total + fullAyahsAfterThis * perAyah;
   }
 
   function updateSessionTiming() {
     const segment = currentSegmentRef.current;
     const el = slotEl(activeSlotRef.current);
     if (!segment || !el) return;
-    const currentKnown = Number.isFinite(el.duration) ? el.duration : undefined;
-    const avg = averageKnownSegmentSeconds();
-    const remaining = countRemainingSegmentsInSurah(segment, showEnglishRef.current, showUrduRef.current);
     const estimatedDuration =
-      elapsedSecondsRef.current + (currentKnown ?? avg) + Math.max(0, remaining - 1) * avg;
+      elapsedSecondsRef.current + estimateSecondsFrom(segment, showEnglishRef.current, showUrduRef.current);
     const position = elapsedSecondsRef.current + (Number.isFinite(el.currentTime) ? el.currentTime : 0);
 
     setSessionPositionSeconds(position);
     setSessionDurationSeconds(estimatedDuration);
+    sessionDurationRef.current = estimatedDuration;
 
     if (typeof navigator !== "undefined" && "mediaSession" in navigator && navigator.mediaSession.setPositionState) {
       try {
@@ -238,6 +263,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     const el = slotEl(slot);
     if (!el) return;
     elapsedSecondsRef.current = 0;
+    sessionStartRef.current = { surahNumber: segment.surahNumber, ayahNumberInSurah: segment.ayahNumberInSurah };
     el.src = segment.url;
     el.playbackRate = playbackRate;
     setCurrentSegment(segment);
@@ -266,24 +292,69 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     }
   }
 
-  function skipByAyah(offset: 1 | -1) {
-    const current = currentSegmentRef.current;
-    if (!current) return;
-    let surahNumber = current.surahNumber;
-    let ayahNumberInSurah = current.ayahNumberInSurah + offset;
-    if (ayahNumberInSurah < 1) {
-      surahNumber -= 1;
-      if (surahNumber < 1) return;
-      ayahNumberInSurah = getSurahMeta(surahNumber).numberOfAyahs;
-    } else if (ayahNumberInSurah > getSurahMeta(surahNumber).numberOfAyahs) {
-      surahNumber += 1;
-      if (surahNumber > TOTAL_SURAHS) return;
-      ayahNumberInSurah = 1;
+  /**
+   * Walks forward segment-by-segment from the current session's start point,
+   * using real measured durations where known and the running average
+   * elsewhere, until the accumulated time reaches `targetSeconds` — then
+   * jumps there. This is how both the scrubber and the ±10s buttons seek,
+   * since the underlying audio is many short per-ayah clips, not one
+   * scrubbable track.
+   */
+  function seekToSeconds(targetSeconds: number) {
+    if (!Number.isFinite(targetSeconds)) return;
+    const start = sessionStartRef.current;
+    if (!start) return;
+    const showEn = showEnglishRef.current;
+    const showUr = showUrduRef.current;
+    const folder = reciterFolderRef.current;
+    const clampedTarget = Math.max(0, targetSeconds);
+
+    let cursor: Segment = makeSegment(start.surahNumber, start.ayahNumberInSurah, "arabic", folder);
+    let accumulated = 0;
+    // Bounded by the number of segments in the whole Quran — never actually reaches that in practice.
+    for (let i = 0; i < 20000; i++) {
+      const segDuration = segmentDurationsRef.current.get(cursor.url) ?? averageSecondsForKind(cursor.kind);
+      if (accumulated + segDuration > clampedTarget) break;
+      accumulated += segDuration;
+      const next = getNextSegment(cursor, showEn, showUr, folder);
+      if (!next) break;
+      cursor = next;
     }
-    loadSegment(
-      makeSegment(surahNumber, ayahNumberInSurah, "arabic", reciterFolderRef.current),
-      isPlaying
-    );
+
+    const wasPlaying = isPlaying;
+    loadSegment(makeSegment(cursor.surahNumber, cursor.ayahNumberInSurah, "arabic", folder), wasPlaying);
+    // loadSegment resets the session anchor to this landing ayah — restore
+    // the original anchor and elapsed time so the timeline keeps referring
+    // to the same start point the user was scrubbing/skipping within.
+    sessionStartRef.current = start;
+    elapsedSecondsRef.current = accumulated;
+  }
+
+  function skipBack10() {
+    seekToSeconds(sessionPositionSeconds - 10);
+  }
+
+  function skipForward10() {
+    seekToSeconds(sessionPositionSeconds + 10);
+  }
+
+  function seekToPercent(percent: number) {
+    const duration = sessionDurationRef.current;
+    if (duration === null || !Number.isFinite(percent)) return;
+    const clampedPercent = Math.min(100, Math.max(0, percent));
+    seekToSeconds((clampedPercent / 100) * duration);
+  }
+
+  function previousSurah() {
+    const current = currentSegmentRef.current;
+    if (!current || current.surahNumber <= 1) return;
+    loadSegment(makeSegment(current.surahNumber - 1, 1, "arabic", reciterFolderRef.current), isPlaying);
+  }
+
+  function nextSurah() {
+    const current = currentSegmentRef.current;
+    if (!current || current.surahNumber >= TOTAL_SURAHS) return;
+    loadSegment(makeSegment(current.surahNumber + 1, 1, "arabic", reciterFolderRef.current), isPlaying);
   }
 
   function handleSlotEnded(slot: 0 | 1) {
@@ -294,7 +365,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     const finishedDuration = finishedEl && Number.isFinite(finishedEl.duration) ? finishedEl.duration : null;
     if (finishedDuration !== null) {
-      segmentDurationsRef.current.set(finished.url, finishedDuration);
+      recordMeasuredDuration(finished, finishedDuration);
       elapsedSecondsRef.current += finishedDuration;
     }
 
@@ -362,10 +433,17 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
     navigator.mediaSession.setActionHandler("play", () => togglePlayPause());
     navigator.mediaSession.setActionHandler("pause", () => togglePlayPause());
-    navigator.mediaSession.setActionHandler("previoustrack", () => skipByAyah(-1));
-    navigator.mediaSession.setActionHandler("nexttrack", () => skipByAyah(1));
-    navigator.mediaSession.setActionHandler("seekbackward", () => skipByAyah(-1));
-    navigator.mediaSession.setActionHandler("seekforward", () => skipByAyah(1));
+    navigator.mediaSession.setActionHandler("previoustrack", () => previousSurah());
+    navigator.mediaSession.setActionHandler("nexttrack", () => nextSurah());
+    navigator.mediaSession.setActionHandler("seekbackward", () => skipBack10());
+    navigator.mediaSession.setActionHandler("seekforward", () => skipForward10());
+    try {
+      navigator.mediaSession.setActionHandler("seekto", (details) => {
+        if (typeof details.seekTime === "number") seekToSeconds(details.seekTime);
+      });
+    } catch {
+      // Not all browsers support the "seekto" action.
+    }
   });
 
   useEffect(() => {
@@ -404,8 +482,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     sessionDurationSeconds,
     playFromAyah,
     togglePlayPause,
-    skipPrev: () => skipByAyah(-1),
-    skipNext: () => skipByAyah(1),
+    skipBack10,
+    skipForward10,
+    previousSurah,
+    nextSurah,
+    seekToPercent,
     setReciterFolder,
     setShowEnglish,
     setShowUrdu,
