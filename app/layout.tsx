@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono, Noto_Naskh_Arabic } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
@@ -22,6 +22,24 @@ const notoNaskhArabic = Noto_Naskh_Arabic({
 export const metadata: Metadata = {
   title: "Quran Together",
   description: "Listen to the Quran and track your completion.",
+  appleWebApp: {
+    title: "Quran Together",
+    statusBarStyle: "black-translucent",
+    capable: true,
+  },
+  other: {
+    // Next's `appleWebApp.capable` only emits the newer, unprefixed
+    // "mobile-web-app-capable" tag — iOS Safari (including fairly recent
+    // versions) primarily honors the "apple-" prefixed one for standalone
+    // (no browser chrome) mode when launched from the home screen.
+    "apple-mobile-web-app-capable": "yes",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#0A2119",
+  width: "device-width",
+  initialScale: 1,
 };
 
 export default function RootLayout({

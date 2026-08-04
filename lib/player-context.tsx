@@ -159,6 +159,16 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }
 
   const [isPlaying, setIsPlaying] = useState(false);
+  // Synchronous mirror of `isPlaying` — native media events (pause/play,
+  // fired by the browser itself on backgrounding/interruption, not just by
+  // our own code) need to know "should this be playing right now" without
+  // waiting for a React re-render, or they can't reliably tell an intentional
+  // pause from an OS-forced one.
+  const isPlayingRef = useRef(false);
+  function updateIsPlaying(value: boolean) {
+    isPlayingRef.current = value;
+    setIsPlaying(value);
+  }
 
   // Whole-surah-session position/duration: real audio files are one short
   // clip per ayah (and per translation), so instead of reporting each tiny
@@ -267,7 +277,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     el.src = segment.url;
     el.playbackRate = playbackRate;
     setCurrentSegment(segment);
-    setIsPlaying(autoplay);
+    updateIsPlaying(autoplay);
     if (autoplay) {
       el.play().catch(() => {});
     } else {
@@ -283,12 +293,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   function togglePlayPause() {
     const el = slotEl(activeSlotRef.current);
     if (!el || !currentSegmentRef.current) return;
-    if (isPlaying) {
+    if (isPlayingRef.current) {
+      // Update the ref first — the native "pause" handler checks it
+      // synchronously to tell an intentional pause from an OS-forced one.
+      updateIsPlaying(false);
       el.pause();
-      setIsPlaying(false);
     } else {
+      updateIsPlaying(true);
       el.play().catch(() => {});
-      setIsPlaying(true);
     }
   }
 
@@ -382,7 +394,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 
     const next = getNextSegment(finished, showEnglishRef.current, showUrduRef.current, reciterFolderRef.current);
     if (!next) {
-      setIsPlaying(false);
+      updateIsPlaying(false);
       return;
     }
 
@@ -396,15 +408,93 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     activeSlotRef.current = newActiveSlot;
     const el = slotEl(newActiveSlot);
     setCurrentSegment(next);
+    updateIsPlaying(shouldAutoplay);
     if (shouldAutoplay && el) {
       el.play().catch(() => {});
-      setIsPlaying(true);
-    } else {
-      setIsPlaying(false);
     }
     preloadIntoInactiveSlot(next);
     updateSessionTiming();
   }
+
+  // --- Background/backgrounded-tab resilience -----------------------------
+  //
+  // Mobile browsers throttle a backgrounded/locked-screen tab's JS execution
+  // heavily. Our engine needs JS to run at every ayah boundary (to load and
+  // play the next short clip), so a throttled tab can miss that moment
+  // entirely — leaving our React state believing something is playing that
+  // the DOM has actually already paused or ended. The fixes below don't try
+  // to prevent that (not reliably possible from a web page), they instead
+  // make the desync self-correcting: strictly enforce "only one slot plays
+  // at a time" on every native `play` event, and resync/repair on `pause`
+  // and whenever the app regains visibility/focus.
+
+  /** Only one audio element should ever be audible — enforced on every native "play". */
+  function handleSlotPlay(slot: 0 | 1) {
+    const other = slotEl(slot === 0 ? 1 : 0);
+    if (other && !other.paused) other.pause();
+  }
+
+  /**
+   * A native "pause" also fires as part of a normal end-of-clip transition
+   * (pause, then ended). Deferring this check lets that synchronous
+   * ended→handleSlotEnded advance run first — by the time this fires, a
+   * legitimate transition will have already moved `activeSlotRef` off
+   * `slot`, so only a genuine OS/browser-forced interruption reaches the
+   * resume attempt below.
+   */
+  function handleSlotPause(slot: 0 | 1) {
+    setTimeout(() => {
+      if (slot !== activeSlotRef.current) return;
+      if (!isPlayingRef.current) return;
+      const el = slotEl(slot);
+      if (!el || el.ended || !el.paused) return;
+      el.play().catch(() => {});
+    }, 50);
+  }
+
+  /**
+   * The reliable recovery point: the browser always delivers this when the
+   * user returns to the tab/unlocks the phone, even after JS was fully
+   * suspended while backgrounded. Repairs any drift between our state and
+   * the real DOM audio elements.
+   */
+  function checkAndRepairPlaybackState() {
+    const activeSlot = activeSlotRef.current;
+    const activeEl = slotEl(activeSlot);
+    const inactiveEl = slotEl(activeSlot === 0 ? 1 : 0);
+    if (!activeEl) return;
+
+    // Overlap safety, independent of whether we should be playing at all.
+    if (inactiveEl && !inactiveEl.paused) inactiveEl.pause();
+
+    if (!isPlayingRef.current) return;
+
+    if (activeEl.ended) {
+      // The 'ended' event for this either never fired or fired while JS was
+      // suspended and got dropped — advance manually using the same logic.
+      handleSlotEnded(activeSlot);
+    } else if (activeEl.paused) {
+      // Paused by the OS (interruption, audio focus loss) rather than by us.
+      activeEl.play().catch(() => {});
+    }
+  }
+
+  useEffect(() => {
+    function onVisibilityOrFocus() {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      checkAndRepairPlaybackState();
+    }
+    document.addEventListener("visibilitychange", onVisibilityOrFocus);
+    window.addEventListener("focus", onVisibilityOrFocus);
+    window.addEventListener("pageshow", onVisibilityOrFocus);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityOrFocus);
+      window.removeEventListener("focus", onVisibilityOrFocus);
+      window.removeEventListener("pageshow", onVisibilityOrFocus);
+    };
+    // Reads only refs internally — safe to wire up once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function setReciterFolder(folder: string) {
     if (userId) updatePreferences({ userId, reciterFolder: folder });
@@ -497,8 +587,20 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   return (
     <PlayerContext.Provider value={value}>
       {children}
-      <audio ref={audioRef0} onEnded={() => handleSlotEnded(0)} onTimeUpdate={updateSessionTiming} />
-      <audio ref={audioRef1} onEnded={() => handleSlotEnded(1)} onTimeUpdate={updateSessionTiming} />
+      <audio
+        ref={audioRef0}
+        onEnded={() => handleSlotEnded(0)}
+        onTimeUpdate={updateSessionTiming}
+        onPlay={() => handleSlotPlay(0)}
+        onPause={() => handleSlotPause(0)}
+      />
+      <audio
+        ref={audioRef1}
+        onEnded={() => handleSlotEnded(1)}
+        onTimeUpdate={updateSessionTiming}
+        onPlay={() => handleSlotPlay(1)}
+        onPause={() => handleSlotPause(1)}
+      />
     </PlayerContext.Provider>
   );
 }
