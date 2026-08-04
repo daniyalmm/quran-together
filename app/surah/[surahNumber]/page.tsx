@@ -14,7 +14,7 @@ export default async function SurahPlayerPage({
   const { surahNumber } = await params;
   return (
     <Suspense fallback={null}>
-      <SurahPlayerClient surahNumber={Number(surahNumber)} />
+      <SurahPlayerClient key={surahNumber} surahNumber={Number(surahNumber)} />
     </Suspense>
   );
 }

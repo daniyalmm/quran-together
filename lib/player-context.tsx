@@ -9,6 +9,7 @@ import {
   DEFAULT_RECITER_FOLDER,
   ENGLISH_TRANSLATION_AUDIO_FOLDER,
   URDU_TRANSLATION_AUDIO_FOLDER,
+  RECITERS,
 } from "@/lib/editions";
 import { buildAyahAudioUrl } from "@/lib/audio-url";
 
@@ -76,6 +77,22 @@ function getNextSegment(
   return null;
 }
 
+/** How many segments remain from (and including) `segment` through the end of its surah. */
+function countRemainingSegmentsInSurah(
+  segment: Segment,
+  showEnglish: boolean,
+  showUrdu: boolean
+): number {
+  const kindsPerAyah = 1 + (showEnglish ? 1 : 0) + (showUrdu ? 1 : 0);
+  const totalAyahs = getSurahMeta(segment.surahNumber).numberOfAyahs;
+  const fullAyahsAfterThis = totalAyahs - segment.ayahNumberInSurah;
+  const kindsLeftInThisAyah =
+    segment.kind === "arabic" ? kindsPerAyah - 1 : segment.kind === "english" ? (showUrdu ? 1 : 0) : 0;
+  return 1 + kindsLeftInThisAyah + fullAyahsAfterThis * kindsPerAyah;
+}
+
+const FALLBACK_SEGMENT_SECONDS = 4;
+
 interface PlayerContextValue {
   surahNumber: number | null;
   ayahNumberInSurah: number | null;
@@ -86,6 +103,10 @@ interface PlayerContextValue {
   showUrdu: boolean;
   playbackRate: number;
   pauseAfterAyah: boolean;
+  /** Seconds elapsed in the current surah-wide listening session (since the last manual jump). */
+  sessionPositionSeconds: number;
+  /** Estimated total seconds for the rest of this listening session — refines as more segments are measured. */
+  sessionDurationSeconds: number | null;
   playFromAyah: (surahNumber: number, ayahNumberInSurah: number) => void;
   togglePlayPause: () => void;
   skipPrev: () => void;
@@ -124,14 +145,16 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const showEnglishRef = useRef(showEnglish);
   const showUrduRef = useRef(showUrdu);
   const pauseAfterAyahRef = useRef(pauseAfterAyah);
+  const playbackRateRef = useRef(playbackRate);
   const userIdRef = useRef(userId);
   useEffect(() => {
     reciterFolderRef.current = reciterFolder;
     showEnglishRef.current = showEnglish;
     showUrduRef.current = showUrdu;
     pauseAfterAyahRef.current = pauseAfterAyah;
+    playbackRateRef.current = playbackRate;
     userIdRef.current = userId;
-  }, [reciterFolder, showEnglish, showUrdu, pauseAfterAyah, userId]);
+  }, [reciterFolder, showEnglish, showUrdu, pauseAfterAyah, playbackRate, userId]);
 
   const audioRef0 = useRef<HTMLAudioElement | null>(null);
   const audioRef1 = useRef<HTMLAudioElement | null>(null);
@@ -146,6 +169,52 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   }
 
   const [isPlaying, setIsPlaying] = useState(false);
+
+  // Whole-surah-session position/duration: real audio files are one short
+  // clip per ayah (and per translation), so instead of reporting each tiny
+  // clip's own duration to the OS media session / our own progress bar, we
+  // treat the run from the last manual jump through to the end of the surah
+  // as one continuous "track" — `elapsedSecondsRef` accumulates the real,
+  // now-known duration of every segment already finished, and
+  // `segmentDurationsRef` caches every measured duration by URL so the
+  // estimate for not-yet-played segments (their average) keeps improving.
+  const elapsedSecondsRef = useRef(0);
+  const segmentDurationsRef = useRef<Map<string, number>>(new Map());
+  const [sessionPositionSeconds, setSessionPositionSeconds] = useState(0);
+  const [sessionDurationSeconds, setSessionDurationSeconds] = useState<number | null>(null);
+
+  function averageKnownSegmentSeconds(): number {
+    const values = Array.from(segmentDurationsRef.current.values());
+    if (values.length === 0) return FALLBACK_SEGMENT_SECONDS;
+    return values.reduce((a, b) => a + b, 0) / values.length;
+  }
+
+  function updateSessionTiming() {
+    const segment = currentSegmentRef.current;
+    const el = slotEl(activeSlotRef.current);
+    if (!segment || !el) return;
+    const currentKnown = Number.isFinite(el.duration) ? el.duration : undefined;
+    const avg = averageKnownSegmentSeconds();
+    const remaining = countRemainingSegmentsInSurah(segment, showEnglishRef.current, showUrduRef.current);
+    const estimatedDuration =
+      elapsedSecondsRef.current + (currentKnown ?? avg) + Math.max(0, remaining - 1) * avg;
+    const position = elapsedSecondsRef.current + (Number.isFinite(el.currentTime) ? el.currentTime : 0);
+
+    setSessionPositionSeconds(position);
+    setSessionDurationSeconds(estimatedDuration);
+
+    if (typeof navigator !== "undefined" && "mediaSession" in navigator && navigator.mediaSession.setPositionState) {
+      try {
+        navigator.mediaSession.setPositionState({
+          duration: estimatedDuration,
+          position: Math.min(position, estimatedDuration),
+          playbackRate: playbackRateRef.current,
+        });
+      } catch {
+        // Duration/position can transiently be inconsistent right as a segment swaps — safe to ignore.
+      }
+    }
+  }
 
   useEffect(() => {
     if (audioRef0.current) audioRef0.current.playbackRate = playbackRate;
@@ -163,11 +232,12 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     el.load();
   }
 
-  /** Loads `segment` into the active slot and optionally starts it. */
+  /** Loads `segment` into the active slot and optionally starts it — a manual jump, so the session timer resets here. */
   function loadSegment(segment: Segment, autoplay: boolean) {
     const slot = activeSlotRef.current;
     const el = slotEl(slot);
     if (!el) return;
+    elapsedSecondsRef.current = 0;
     el.src = segment.url;
     el.playbackRate = playbackRate;
     setCurrentSegment(segment);
@@ -219,7 +289,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   function handleSlotEnded(slot: 0 | 1) {
     if (slot !== activeSlotRef.current) return;
     const finished = currentSegmentRef.current;
+    const finishedEl = slotEl(slot);
     if (!finished) return;
+
+    const finishedDuration = finishedEl && Number.isFinite(finishedEl.duration) ? finishedEl.duration : null;
+    if (finishedDuration !== null) {
+      segmentDurationsRef.current.set(finished.url, finishedDuration);
+      elapsedSecondsRef.current += finishedDuration;
+    }
 
     if (finished.kind === "arabic" && userIdRef.current) {
       reportAyahPlayback({
@@ -255,6 +332,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       setIsPlaying(false);
     }
     preloadIntoInactiveSlot(next);
+    updateSessionTiming();
   }
 
   function setReciterFolder(folder: string) {
@@ -276,6 +354,42 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     updatePreferences({ userId, playbackRate: next });
   }
 
+  // Lock-screen / OS media control surface: shows the surah (not the tiny
+  // per-ayah clip) as the "track", and wires physical/lock-screen transport
+  // buttons back to our ayah-level controls. Re-runs every render so the
+  // handlers always close over the latest functions/state — cheap to reassign.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    navigator.mediaSession.setActionHandler("play", () => togglePlayPause());
+    navigator.mediaSession.setActionHandler("pause", () => togglePlayPause());
+    navigator.mediaSession.setActionHandler("previoustrack", () => skipByAyah(-1));
+    navigator.mediaSession.setActionHandler("nexttrack", () => skipByAyah(1));
+    navigator.mediaSession.setActionHandler("seekbackward", () => skipByAyah(-1));
+    navigator.mediaSession.setActionHandler("seekforward", () => skipByAyah(1));
+  });
+
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    if (!currentSegment) {
+      navigator.mediaSession.metadata = null;
+      return;
+    }
+    const surahMeta = getSurahMeta(currentSegment.surahNumber);
+    const reciterLabel = RECITERS.find((r) => r.folder === reciterFolder)?.label ?? "Quran Together";
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: surahMeta.englishName,
+      artist: reciterLabel,
+      album: "Quran Together",
+    });
+    // Only the surah (not every ayah) should refresh the lock-screen metadata.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentSegment?.surahNumber, reciterFolder]);
+
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
+  }, [isPlaying]);
+
   const value: PlayerContextValue = {
     surahNumber: currentSegment?.surahNumber ?? null,
     ayahNumberInSurah: currentSegment?.ayahNumberInSurah ?? null,
@@ -286,6 +400,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     showUrdu,
     playbackRate,
     pauseAfterAyah,
+    sessionPositionSeconds,
+    sessionDurationSeconds,
     playFromAyah,
     togglePlayPause,
     skipPrev: () => skipByAyah(-1),
@@ -300,8 +416,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   return (
     <PlayerContext.Provider value={value}>
       {children}
-      <audio ref={audioRef0} onEnded={() => handleSlotEnded(0)} />
-      <audio ref={audioRef1} onEnded={() => handleSlotEnded(1)} />
+      <audio ref={audioRef0} onEnded={() => handleSlotEnded(0)} onTimeUpdate={updateSessionTiming} />
+      <audio ref={audioRef1} onEnded={() => handleSlotEnded(1)} onTimeUpdate={updateSessionTiming} />
     </PlayerContext.Provider>
   );
 }

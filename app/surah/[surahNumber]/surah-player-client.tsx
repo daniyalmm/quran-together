@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useMutation, useQuery } from "convex/react";
 import { ChevronLeft } from "lucide-react";
@@ -16,6 +16,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 export function SurahPlayerClient({ surahNumber }: { surahNumber: number }) {
   const searchParams = useSearchParams();
+  const router = useRouter();
   const surahMeta = getSurahMeta(surahNumber);
   const player = usePlayer();
 
@@ -66,7 +67,31 @@ export function SurahPlayerClient({ surahNumber }: { surahNumber: number }) {
       behavior: "smooth",
       block: "center",
     });
-  }, [isThisSurahPlaying, player.ayahNumberInSurah]);
+    // `ayahs` is intentionally a dependency (not read in the body): until it
+    // loads, the AyahLine rows haven't rendered so ayahRefs is still empty
+    // and the scroll above would silently no-op — this re-runs once they exist.
+  }, [isThisSurahPlaying, player.ayahNumberInSurah, ayahs]);
+
+  // Once this page is following the player (the user started or resumed
+  // playback here), keep following it — including across an auto-advance to
+  // the next surah, or skipping past this surah's boundary — by navigating
+  // along. `wasSyncedRef` starts false so visiting an unrelated surah while
+  // something else plays elsewhere never triggers an unwanted redirect.
+  const wasSyncedRef = useRef(isThisSurahPlaying);
+  useEffect(() => {
+    if (isThisSurahPlaying) wasSyncedRef.current = true;
+  }, [isThisSurahPlaying]);
+
+  useEffect(() => {
+    if (
+      wasSyncedRef.current &&
+      !isThisSurahPlaying &&
+      player.surahNumber !== null &&
+      player.surahNumber !== surahNumber
+    ) {
+      router.replace(`/surah/${player.surahNumber}`);
+    }
+  }, [isThisSurahPlaying, player.surahNumber, surahNumber, router]);
 
   function handleToggleManual(row: { numberInSurah: number; globalAyahNumber: number }) {
     if (!userId) return;
